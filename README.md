@@ -2,7 +2,7 @@
   <img src="assets/litax-logo.png" alt="Litax Logo" width="180">
 </p>
 
-<h1 align="center">⚡ Litax</h1>
+<h1 align="center">Litax</h1>
 
 <p align="center">
   <strong>Universal Bare-Metal Linux Latency Hardening & Workstation Tuner</strong><br>
@@ -18,7 +18,7 @@
 
 ---
 
-## ⚡ Quick Start
+##  Quick Start
 
 You can run Litax directly from your terminal with zero prior setup:
 
@@ -133,7 +133,7 @@ litax/
 
 ---
 
-## 🌐 Cross-Distro Compatibility Matrix
+##  Cross-Distro Compatibility Matrix
 
 Litax includes an automated package manager and init abstraction layer:
 
