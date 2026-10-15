@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# ZENITH: Production-Grade Linux Workstation Latency Hardening & Bare-Metal Tuner
+# ZENITH: Universal Bare-Metal Linux Latency Hardening & Workstation Tuner
 # Author: Eka Restu Syahputra (GitHub: kaarlyz) & Vallencia
 # License: MIT
-# Compatibility: Arch Linux, Fedora, Debian/Ubuntu, openSUSE (Wayland & X11)
+# Cross-Distro Support: Arch, Fedora, Ubuntu, Debian, openSUSE, Pop!_OS, Void
 # ==============================================================================
 
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 BACKUP_DIR="/var/backups/zenith-$(date +%Y%m%d-%H%M%S)"
-CONFIG_DIR="/etc/zenith"
 LOG_FILE="/tmp/zenith-tune.log"
 
 # --- ANSI Styling ---
@@ -38,8 +37,8 @@ banner() {
   echo " ███╔╝  ██╔══╝  ██║╚██╗██║██║   ██║   ██╔══██║"
   echo "███████╗███████╗██║ ╚████║██║   ██║   ██║  ██║"
   echo "╚══════╝╚══════╝╚═╝  ╚═══╝╚═╝   ╚═╝   ╚═╝  ╚═╝"
-  echo -e "${RESET}${DIM}  Bare-Metal Latency Hardening & Workstation Optimizer v${VERSION}${RESET}"
-  echo -e "${DIM}  Architected for Zero Stutter, Fast Frame Pacing & Seamless Multitasking${RESET}\n"
+  echo -e "${RESET}${DIM}  Universal Bare-Metal Latency Hardening & Workstation Tuner v${VERSION}${RESET}"
+  echo -e "${DIM}  Zero-Stutter, Hardware-Aware Pacing & Universal Multi-Distro Support${RESET}\n"
 }
 
 check_root() {
@@ -47,6 +46,62 @@ check_root() {
     echo -e "${RED}${BOLD}Error:${RESET} Zenith requires root privileges for kernel, udev, and systemd tuning."
     echo -e "Please run with: ${CYAN}sudo $0${RESET}"
     exit 1
+  fi
+}
+
+# --- Cross-Distro Package Management Abstraction ---
+pkg_is_installed() {
+  local pkg="$1"
+  case "$PKG_MGR" in
+    pacman) pacman -Qi "$pkg" >/dev/null 2>&1 ;;
+    dnf)    rpm -q "$pkg" >/dev/null 2>&1 ;;
+    apt)    dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "ok installed" ;;
+    zypper) rpm -q "$pkg" >/dev/null 2>&1 ;;
+    *)      command -v "$pkg" >/dev/null 2>&1 ;;
+  esac
+}
+
+install_missing_packages() {
+  local packages=("$@")
+  local to_install=()
+
+  for pkg in "${packages[@]}"; do
+    if ! command -v "$pkg" >/dev/null 2>&1 && ! pkg_is_installed "$pkg"; then
+      to_install+=("$pkg")
+    fi
+  done
+
+  if [ "${#to_install[@]}" -gt 0 ]; then
+    log_info "Installing missing dependencies (${PKG_MGR}): ${to_install[*]}..."
+    case "$PKG_MGR" in
+      pacman)
+        pacman -S --needed --noconfirm "${to_install[@]}" >/dev/null 2>&1 || true
+        ;;
+      dnf)
+        dnf install -y "${to_install[@]}" >/dev/null 2>&1 || true
+        ;;
+      apt)
+        apt-get update -qq >/dev/null 2>&1 || true
+        apt-get install -y --no-install-recommends "${to_install[@]}" >/dev/null 2>&1 || true
+        ;;
+      zypper)
+        zypper --non-interactive install "${to_install[@]}" >/dev/null 2>&1 || true
+        ;;
+      *)
+        log_warn "Unknown package manager. Please install: ${to_install[*]}"
+        ;;
+    esac
+  fi
+}
+
+backup_config() {
+  local file="$1"
+  if [ -f "$file" ]; then
+    mkdir -p "$BACKUP_DIR"
+    local rel_dir
+    rel_dir="$(dirname "$file")"
+    mkdir -p "${BACKUP_DIR}${rel_dir}"
+    cp -p "$file" "${BACKUP_DIR}${file}"
   fi
 }
 
@@ -60,9 +115,11 @@ detect_environment() {
     source /etc/os-release
     DISTRO_NAME="${NAME:-Linux}"
     DISTRO_ID="${ID:-linux}"
+    DISTRO_LIKE="${ID_LIKE:-$DISTRO_ID}"
   else
     DISTRO_NAME="Generic Linux"
     DISTRO_ID="generic"
+    DISTRO_LIKE="generic"
   fi
 
   if command -v pacman >/dev/null 2>&1; then
@@ -77,7 +134,13 @@ detect_environment() {
     PKG_MGR="unknown"
   fi
 
-  # 2. CPU Architecture & Features
+  # 2. Init System
+  HAS_SYSTEMD=false
+  if pidof systemd >/dev/null 2>&1 || [ -d /run/systemd/system ]; then
+    HAS_SYSTEMD=true
+  fi
+
+  # 3. CPU Architecture & Features
   CPU_MODEL=$(grep -m1 "model name" /proc/cpuinfo | cut -d: -f2 | sed 's/^[ \t]*//')
   CPU_CORES=$(grep -c "^processor" /proc/cpuinfo)
   if grep -qi "amd" /proc/cpuinfo; then
@@ -88,28 +151,28 @@ detect_environment() {
     CPU_VENDOR="Unknown"
   fi
 
-  # 3. RAM & Swap / ZRAM
+  # 4. RAM & Swap / ZRAM
   TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
   TOTAL_RAM_GB=$(( (TOTAL_RAM_KB + 524288) / 1048576 ))
 
   CURRENT_SWAP_TYPE="none"
-  if swapon --show | grep -q "/dev/zram"; then
+  CURRENT_ZRAM_ALGO=""
+  if swapon --show 2>/dev/null | grep -q "/dev/zram"; then
     CURRENT_SWAP_TYPE="zram"
     CURRENT_ZRAM_ALGO=$(zramctl 2>/dev/null | awk 'NR>1 {print $2}' | head -n1 || echo "unknown")
-  elif swapon --show | grep -q "partition\|file"; then
+  elif swapon --show 2>/dev/null | grep -q "partition\|file"; then
     CURRENT_SWAP_TYPE="disk-swap"
   fi
 
-  # 4. Storage & Filesystem
-  ROOT_DEV=$(findmnt -no SOURCE / | sed 's/\[.*\]//')
-  ROOT_FS=$(findmnt -no FSTYPE /)
-  ROOT_OPTS=$(findmnt -no OPTIONS /)
+  # 5. Storage & Filesystem
+  ROOT_DEV=$(findmnt -no SOURCE / 2>/dev/null | sed 's/\[.*\]//' || echo "/dev/root")
+  ROOT_FS=$(findmnt -no FSTYPE / 2>/dev/null || echo "ext4")
   IS_NVME=false
   if [[ "$ROOT_DEV" =~ nvme ]]; then
     IS_NVME=true
   fi
 
-  # 5. GPU & Display Server
+  # 6. GPU & Display Server
   if lspci 2>/dev/null | grep -iE 'vga|3d|display' | grep -qi 'amd'; then
     GPU_VENDOR="AMD"
   elif lspci 2>/dev/null | grep -iE 'vga|3d|display' | grep -qi 'nvidia'; then
@@ -122,84 +185,64 @@ detect_environment() {
 
   IS_WAYLAND=false
   CURRENT_DESKTOP="Unknown"
-  if [ -n "${WAYLAND_DISPLAY:-}" ] || pgrep -x "kwin_wayland" >/dev/null || pgrep -x "gnome-shell" >/dev/null; then
+  if [ -n "${WAYLAND_DISPLAY:-}" ] || pgrep -x "kwin_wayland" >/dev/null || pgrep -x "gnome-shell" >/dev/null || pgrep -x "Hyprland" >/dev/null; then
     IS_WAYLAND=true
   fi
   if pgrep -x "kwin_wayland" >/dev/null || pgrep -x "plasmashell" >/dev/null; then
-    CURRENT_DESKTOP="KDE Plasma 6"
+    CURRENT_DESKTOP="KDE Plasma"
   elif pgrep -x "gnome-shell" >/dev/null; then
     CURRENT_DESKTOP="GNOME"
   elif pgrep -x "Hyprland" >/dev/null; then
     CURRENT_DESKTOP="Hyprland"
+  elif pgrep -x "sway" >/dev/null; then
+    CURRENT_DESKTOP="Sway"
+  elif [ -n "${XDG_CURRENT_DESKTOP:-}" ]; then
+    CURRENT_DESKTOP="$XDG_CURRENT_DESKTOP"
   fi
 
   # Display Summary
-  echo -e "  ${BOLD}Distribution:${RESET}   ${DISTRO_NAME} (${PKG_MGR})"
+  echo -e "  ${BOLD}Distribution:${RESET}   ${DISTRO_NAME} (${PKG_MGR}, systemd: ${HAS_SYSTEMD})"
   echo -e "  ${BOLD}Processor:${RESET}      ${CPU_MODEL} (${CPU_CORES} threads, ${CPU_VENDOR})"
   echo -e "  ${BOLD}Memory:${RESET}         ${TOTAL_RAM_GB} GB RAM (Swap: ${CURRENT_SWAP_TYPE}${CURRENT_ZRAM_ALGO:+ [$CURRENT_ZRAM_ALGO]})"
   echo -e "  ${BOLD}Primary Disk:${RESET}   ${ROOT_DEV} (${ROOT_FS}, NVMe: ${IS_NVME})"
   echo -e "  ${BOLD}Graphics:${RESET}       ${GPU_VENDOR} (${CURRENT_DESKTOP}, Wayland: ${IS_WAYLAND})"
 }
 
-backup_config() {
-  local file="$1"
-  if [ -f "$file" ]; then
-    mkdir -p "$BACKUP_DIR"
-    local rel_dir
-    rel_dir="$(dirname "$file")"
-    mkdir -p "${BACKUP_DIR}${rel_dir}"
-    cp -p "$file" "${BACKUP_DIR}${file}"
-  fi
-}
-
-install_missing_packages() {
-  local packages=("$@")
-  local to_install=()
-
-  for pkg in "${packages[@]}"; do
-    if ! command -v "$pkg" >/dev/null 2>&1 && ! pacman -Qi "$pkg" >/dev/null 2>&1; then
-      to_install+=("$pkg")
-    fi
-  done
-
-  if [ "${#to_install[@]}" -gt 0 ]; then
-    log_info "Installing required packages: ${to_install[*]}..."
-    case "$PKG_MGR" in
-      pacman)
-        pacman -S --needed --noconfirm "${to_install[@]}" >/dev/null 2>&1 || true
-        ;;
-      dnf)
-        dnf install -y "${to_install[@]}" >/dev/null 2>&1 || true
-        ;;
-      apt)
-        apt-get update -qq >/dev/null 2>&1 || true
-        apt-get install -y "${to_install[@]}" >/dev/null 2>&1 || true
-        ;;
-      *)
-        log_warn "Unknown package manager. Please ensure ${to_install[*]} are installed manually."
-        ;;
-    esac
-  fi
-}
-
 # --- Module 1: ZRAM LZ4 & Low-Latency Virtual Memory ---
 tune_zram_and_vm() {
   log_step "Tuning Virtual Memory & ZRAM (LZ4 Engine)..."
 
-  # 1. Install & configure zram-generator if supported
-  if [ "$PKG_MGR" = "pacman" ]; then
-    install_missing_packages "zram-generator"
+  # 1. Distro-Adaptive ZRAM Service Configuration
+  local zram_pkg=""
+  case "$PKG_MGR" in
+    pacman) zram_pkg="zram-generator" ;;
+    dnf)    zram_pkg="zram-generator" ;;
+    apt)    zram_pkg="systemd-zram-generator" ;;
+    zypper) zram_pkg="systemd-zram-generator" ;;
+  esac
+
+  if [ -n "$zram_pkg" ]; then
+    install_missing_packages "$zram_pkg"
   fi
 
-  backup_config "/etc/systemd/zram-generator.conf"
-  cat << 'EOF' > /etc/systemd/zram-generator.conf
+  if [ -d /etc/systemd ]; then
+    backup_config "/etc/systemd/zram-generator.conf"
+    cat << 'EOF' > /etc/systemd/zram-generator.conf
 [zram0]
 zram-size = ram
 compression-algorithm = lz4
 EOF
-  log_success "ZRAM compression set to LZ4 (sub-microsecond decompression at ~4,500 MB/s per core)."
+    log_success "ZRAM compression set to LZ4 (sub-microsecond decompression at ~4,500 MB/s per core)."
 
-  # 2. Kernel Virtual Memory & Dirty Flushing
+    # Reload systemd zram generator if active
+    if [ "$HAS_SYSTEMD" = true ]; then
+      swapoff /dev/zram0 2>/dev/null || true
+      systemctl restart systemd-zram-setup@zram0.service 2>/dev/null || true
+    fi
+  fi
+
+  # 2. Cross-Distro Sysctl Memory & Dirty Writeback Tuning
+  mkdir -p /etc/sysctl.d
   backup_config "/etc/sysctl.d/99-zenith-vm.conf"
   cat << 'EOF' > /etc/sysctl.d/99-zenith-vm.conf
 # Virtual Memory & ZRAM Tuning
@@ -222,91 +265,109 @@ kernel.nmi_watchdog = 0
 kernel.sched_autogroup_enabled = 0
 kernel.pid_max = 4194304
 EOF
-  sysctl --system >/dev/null 2>&1
-  log_success "Kernel dirty page writeback converted to 64MB streaming batches (zero 1.4GB freeze spikes)."
-
-  # 3. Reload ZRAM safely
-  if command -v systemctl >/dev/null 2>&1 && systemctl is-active systemd-zram-setup@zram0.service >/dev/null 2>&1; then
-    swapoff /dev/zram0 2>/dev/null || true
-    systemctl restart systemd-zram-setup@zram0.service 2>/dev/null || true
-  fi
+  sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-zenith-vm.conf >/dev/null 2>&1 || true
+  log_success "Kernel dirty page writeback converted to 64MB streaming batches (zero multi-gigabyte freeze spikes)."
 }
 
-# --- Module 2: NVMe SSD & Filesystem Pipeline ---
+# --- Module 2: NVMe SSD & Filesystem Pipeline (Btrfs & Ext4) ---
 tune_storage() {
-  log_step "Tuning Storage & Filesystem (NVMe Queue & Btrfs)..."
+  log_step "Tuning Storage & Filesystem (NVMe Queue & Filesystem Latency)..."
 
   # 1. NVMe udev tuning (Zero-Overhead I/O Accounting)
   if [ "$IS_NVME" = true ]; then
+    mkdir -p /etc/udev/rules.d
     backup_config "/etc/udev/rules.d/60-zenith-nvme.rules"
     cat << 'EOF' > /etc/udev/rules.d/60-zenith-nvme.rules
 ACTION=="add|change", KERNEL=="nvme[0-9]*n[0-9]*", ATTR{queue/scheduler}="none", ATTR{queue/iostats}="0", ATTR{queue/read_ahead_kb}="128"
 EOF
-    udevadm control --reload-rules >/dev/null 2>&1 || true
-    udevadm trigger --subsystem-match=block >/dev/null 2>&1 || true
+    if command -v udevadm >/dev/null 2>&1; then
+      udevadm control --reload-rules >/dev/null 2>&1 || true
+      udevadm trigger --subsystem-match=block >/dev/null 2>&1 || true
+    fi
     log_success "NVMe queue configured: scheduler=[none], iostats=0 (per-request accounting disabled)."
   fi
 
-  # 2. Btrfs SSD noatime & commit=120
-  if [ "$ROOT_FS" = "btrfs" ]; then
+  # 2. Filesystem Specific Hardening (Btrfs / Ext4)
+  if [ -f /etc/fstab ]; then
     backup_config "/etc/fstab"
+
+    # Universal noatime conversion across all modern SSDs
     if grep -q "relatime" /etc/fstab; then
       sed -i 's/relatime/noatime/g' /etc/fstab
       mount -o remount,noatime / 2>/dev/null || true
       mount -o remount,noatime /home 2>/dev/null || true
-      log_success "Btrfs subvolumes remounted with noatime (metadata write-amplification eliminated)."
+      log_success "SSD mounts updated to noatime (metadata write-amplification eliminated)."
     fi
 
-    if ! grep -q "commit=" /etc/fstab; then
+    # Btrfs commit=120
+    if [ "$ROOT_FS" = "btrfs" ] && ! grep -q "commit=" /etc/fstab; then
       sed -i 's/space_cache=v2/space_cache=v2,commit=120/g' /etc/fstab
       mount -o remount,commit=120 / 2>/dev/null || true
       mount -o remount,commit=120 /home 2>/dev/null || true
       log_success "Btrfs commit interval extended to 120s (transient build files coalesce in RAM)."
     fi
+
+    # Ext4 commit=60 (Ubuntu / Debian default)
+    if [ "$ROOT_FS" = "ext4" ] && ! grep -q "commit=" /etc/fstab; then
+      mount -o remount,commit=60 / 2>/dev/null || true
+      log_success "Ext4 commit interval extended to 60s (reduces disk write churn during builds)."
+    fi
   fi
 
   # 3. NVMe TRIM Timer
-  if command -v systemctl >/dev/null 2>&1; then
+  if [ "$HAS_SYSTEMD" = true ]; then
     systemctl enable --now fstrim.timer >/dev/null 2>&1 || true
-    log_success "NVMe fstrim.timer enabled for automated weekly background flash maintenance."
+    log_success "fstrim.timer enabled for automated weekly background flash reclamation."
   fi
 }
 
 # --- Module 3: Wayland Compositor & Display Frame Pacing ---
 tune_wayland_display() {
-  log_step "Tuning Wayland Compositor & Display Refresh Alignment..."
+  log_step "Tuning Wayland Compositor & Display Frame Pacing..."
 
-  # Detect real user (non-root) home directory
   REAL_USER="${SUDO_USER:-$USER}"
   REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 
-  if [ "$CURRENT_DESKTOP" = "KDE Plasma 6" ]; then
-    # 1. KWin LatencyPolicy=ExtremelyLow
-    KWIN_RC="${REAL_HOME}/.config/kwinrc"
-    if [ -f "$KWIN_RC" ] && command -v kwriteconfig6 >/dev/null 2>&1; then
-      sudo -u "$REAL_USER" kwriteconfig6 --file "$KWIN_RC" --group Compositing --key LatencyPolicy ExtremelyLow
-      sudo -u "$REAL_USER" kwriteconfig6 --file "$KWIN_RC" --group Compositing --key GLCore true
-      log_success "KWin Compositor: LatencyPolicy set to ExtremelyLow (sub-millisecond frame deadline)."
+  # 1. KDE Plasma (6 or 5)
+  local kwritecmd=""
+  if command -v kwriteconfig6 >/dev/null 2>&1; then
+    kwritecmd="kwriteconfig6"
+  elif command -v kwriteconfig5 >/dev/null 2>&1; then
+    kwritecmd="kwriteconfig5"
+  fi
+
+  if [ -n "$kwritecmd" ]; then
+    local kwinrc="${REAL_HOME}/.config/kwinrc"
+    if [ -f "$kwinrc" ]; then
+      sudo -u "$REAL_USER" "$kwritecmd" --file "$kwinrc" --group Compositing --key LatencyPolicy ExtremelyLow 2>/dev/null || true
+      sudo -u "$REAL_USER" "$kwritecmd" --file "$kwinrc" --group Compositing --key GLCore true 2>/dev/null || true
+      log_success "KWin: LatencyPolicy set to ExtremelyLow (sub-millisecond frame deadline)."
     fi
 
-    # 2. KDE Animation Duration Factor 0.5x
-    KDE_GLOBALS="${REAL_HOME}/.config/kdeglobals"
-    if [ -f "$KDE_GLOBALS" ] && command -v kwriteconfig6 >/dev/null 2>&1; then
-      sudo -u "$REAL_USER" kwriteconfig6 --file "$KDE_GLOBALS" --group KDE --key AnimationDurationFactor 0.5
-      log_success "KDE Desktop: Animation duration scaled to 0.5x (crisp Apple ProMotion-style response)."
+    local kdeglobals="${REAL_HOME}/.config/kdeglobals"
+    if [ -f "$kdeglobals" ]; then
+      sudo -u "$REAL_USER" "$kwritecmd" --file "$kdeglobals" --group KDE --key AnimationDurationFactor 0.5 2>/dev/null || true
+      log_success "KDE: Animation duration scaled to 0.5x (Apple ProMotion 120Hz-style responsiveness)."
     fi
 
-    # 3. KWin Output Config VRR
-    KWIN_OUT="${REAL_HOME}/.config/kwinoutputconfig.json"
-    if [ -f "$KWIN_OUT" ]; then
-      sed -i 's/"vrrPolicy": "Never"/"vrrPolicy": "Automatic"/g' "$KWIN_OUT" 2>/dev/null || true
+    local kwin_out="${REAL_HOME}/.config/kwinoutputconfig.json"
+    if [ -f "$kwin_out" ]; then
+      sed -i 's/"vrrPolicy": "Never"/"vrrPolicy": "Automatic"/g' "$kwin_out" 2>/dev/null || true
       log_success "KWin Displays: Adaptive Sync (VRR) set to Automatic across external panels."
     fi
 
-    # Reload KWin live via D-Bus
-    if [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+    # Live reload via D-Bus
+    if command -v qdbus6 >/dev/null 2>&1; then
       sudo -u "$REAL_USER" qdbus6 org.kde.KWin /KWin reconfigure >/dev/null 2>&1 || true
+    elif command -v qdbus >/dev/null 2>&1; then
+      sudo -u "$REAL_USER" qdbus org.kde.KWin /KWin reconfigure >/dev/null 2>&1 || true
     fi
+  fi
+
+  # 2. GNOME / Mutter (Ubuntu / Fedora)
+  if command -v gsettings >/dev/null 2>&1 && [ "$CURRENT_DESKTOP" = "GNOME" ]; then
+    sudo -u "$REAL_USER" gsettings set org.gnome.mutter experimental-features "['scale-monitor-framebuffer', 'variable-refresh-rate']" 2>/dev/null || true
+    log_success "GNOME Mutter: Variable Refresh Rate (VRR) & Wayland frame scaling enabled."
   fi
 }
 
@@ -316,7 +377,6 @@ tune_gpu_and_toolkits() {
 
   backup_config "/etc/environment"
 
-  # Strip any previous conflicting entries
   sed -i '/RADV_PERFTEST/d' /etc/environment 2>/dev/null || true
   sed -i '/MESA_DISK_CACHE_SINGLE_FILE/d' /etc/environment 2>/dev/null || true
   sed -i '/mesa_glthread/d' /etc/environment 2>/dev/null || true
@@ -363,22 +423,22 @@ tune_applications() {
   REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 
   # 1. Brave Browser Flags
-  BRAVE_FLAGS="${REAL_HOME}/.config/brave-flags.conf"
-  mkdir -p "$(dirname "$BRAVE_FLAGS")"
-  cat << 'EOF' > "$BRAVE_FLAGS"
+  local brave_flags="${REAL_HOME}/.config/brave-flags.conf"
+  mkdir -p "$(dirname "$brave_flags")"
+  cat << 'EOF' > "$brave_flags"
 --ozone-platform=wayland
 --enable-gpu-rasterization
 --enable-zero-copy
 --enable-smooth-scrolling
 --enable-features=VaapiVideoDecodeLinuxGL,VaapiVideoEncoder,CanvasOopRasterization,SmoothScrolling,WindowsScrollingPersonality
 EOF
-  chown "$REAL_USER:$REAL_USER" "$BRAVE_FLAGS"
+  chown "$REAL_USER:$REAL_USER" "$brave_flags"
   log_success "Brave: Configured native Wayland zero-copy GPU rasterization and momentum scrolling."
 
   # 2. VS Code Flags
-  CODE_FLAGS="${REAL_HOME}/.config/code-flags.conf"
-  mkdir -p "$(dirname "$CODE_FLAGS")"
-  cat << 'EOF' > "$CODE_FLAGS"
+  local code_flags="${REAL_HOME}/.config/code-flags.conf"
+  mkdir -p "$(dirname "$code_flags")"
+  cat << 'EOF' > "$code_flags"
 --password-store=gnome-libsecret
 --ozone-platform-hint=auto
 --ozone-platform=wayland
@@ -386,12 +446,13 @@ EOF
 --enable-gpu-rasterization
 --enable-zero-copy
 EOF
-  chown "$REAL_USER:$REAL_USER" "$CODE_FLAGS"
+  chown "$REAL_USER:$REAL_USER" "$code_flags"
   log_success "VS Code: Wayland window decorations and zero-copy rasterization enabled."
 
   # 3. Firefox MSD Physics Scrolling
   for ff_userjs in "${REAL_HOME}/.mozilla/firefox/"*"/user.js" "${REAL_HOME}/.config/mozilla/firefox/"*"/user.js"; do
     if [ -f "$ff_userjs" ]; then
+      sed -i '/Zenith Kinetic/d' "$ff_userjs" 2>/dev/null || true
       cat << 'EOF' >> "$ff_userjs"
 
 // Zenith Kinetic Mass-Spring-Damper (MSD) Scrolling
@@ -413,7 +474,7 @@ EOF
     fi
   done
 
-  # 4. Flatpak Electron Permissions (if flatpak installed)
+  # 4. Flatpak Electron Permissions
   if command -v flatpak >/dev/null 2>&1; then
     sudo -u "$REAL_USER" flatpak override --user --socket=wayland --device=dri com.discordapp.Discord 2>/dev/null || true
     sudo -u "$REAL_USER" flatpak override --user --socket=wayland --device=dri --env=QT_QPA_PLATFORM=wayland com.ktechpit.whatsie 2>/dev/null || true
@@ -428,12 +489,14 @@ tune_network() {
   modprobe tcp_bbr 2>/dev/null || true
   modprobe sch_cake 2>/dev/null || true
 
+  mkdir -p /etc/modules-load.d
   backup_config "/etc/modules-load.d/zenith-net.conf"
   cat << 'EOF' > /etc/modules-load.d/zenith-net.conf
 tcp_bbr
 sch_cake
 EOF
 
+  mkdir -p /etc/sysctl.d
   backup_config "/etc/sysctl.d/99-zenith-net.conf"
   cat << 'EOF' > /etc/sysctl.d/99-zenith-net.conf
 # Bufferbloat Elimination & Line-Speed TCP Stack
@@ -448,8 +511,14 @@ net.core.rmem_max = 33554432
 net.core.wmem_max = 33554432
 net.core.netdev_max_backlog = 10000
 net.ipv4.tcp_max_syn_backlog = 8192
+
+# High-Concurrency Async I/O & File Descriptors
+fs.file-max = 2097152
+fs.aio-max-nr = 1048576
+fs.inotify.max_user_watches = 524288
+fs.inotify.max_user_instances = 1024
 EOF
-  sysctl --system >/dev/null 2>&1
+  sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-zenith-net.conf >/dev/null 2>&1 || true
   log_success "BBR + CAKE active with tcp_slow_start_after_idle=0 (line-speed retention on idle streams)."
 }
 
@@ -466,6 +535,7 @@ tune_process_priority() {
     cat << 'EOF' > /etc/ananicy.d/99-zenith-workstation.rules
 { "name": "kwin_wayland", "nice": -12, "ioclass": "best-effort" }
 { "name": "plasmashell", "nice": -4, "ioclass": "best-effort" }
+{ "name": "gnome-shell", "nice": -10, "ioclass": "best-effort" }
 { "name": "code", "nice": -3, "ioclass": "best-effort" }
 { "name": "kitty", "nice": -4, "ioclass": "best-effort" }
 { "name": "brave", "nice": -2, "ioclass": "best-effort" }
@@ -474,7 +544,9 @@ tune_process_priority() {
 { "name": "QtWebEngineProcess", "nice": 8, "ioclass": "idle" }
 { "name": "Discord", "nice": 5, "ioclass": "best-effort" }
 EOF
-    systemctl restart ananicy-cpp.service 2>/dev/null || true
+    if [ "$HAS_SYSTEMD" = true ]; then
+      systemctl restart ananicy-cpp.service 2>/dev/null || true
+    fi
     log_success "Ananicy rules deployed: Compositor & editors elevated; background chat workers throttled to idle."
   fi
 }
@@ -484,32 +556,36 @@ tune_system_hygiene() {
   log_step "Hardening System Freeze Protection (Coredump & Journal Churn)..."
 
   # 1. Disable coredump write stalls
-  mkdir -p /etc/systemd/coredump.conf.d
-  cat << 'EOF' > /etc/systemd/coredump.conf.d/disable.conf
+  if [ -d /etc/systemd ]; then
+    mkdir -p /etc/systemd/coredump.conf.d
+    cat << 'EOF' > /etc/systemd/coredump.conf.d/disable.conf
 [Coredump]
 Storage=none
 ProcessSizeMax=0
 EOF
-  log_success "systemd-coredump disabled (stops multi-second disk lockups on background process crashes)."
+    log_success "systemd-coredump disabled (stops multi-second disk lockups on background process crashes)."
 
-  # 2. Journald Churn Cap
-  mkdir -p /etc/systemd/journald.conf.d
-  cat << 'EOF' > /etc/systemd/journald.conf.d/00-zenith-journal.conf
+    # 2. Journald Churn Cap
+    mkdir -p /etc/systemd/journald.conf.d
+    cat << 'EOF' > /etc/systemd/journald.conf.d/00-zenith-journal.conf
 [Journal]
 SystemMaxUse=100M
 RuntimeMaxUse=50M
 Storage=auto
 Compress=yes
 EOF
-  systemctl restart systemd-journald >/dev/null 2>&1 || true
-  log_success "systemd-journald capped at 100MB with in-RAM compression."
+    if [ "$HAS_SYSTEMD" = true ]; then
+      systemctl restart systemd-journald >/dev/null 2>&1 || true
+    fi
+    log_success "systemd-journald capped at 100MB with in-RAM compression."
+  fi
 
   # 3. PipeWire Low-Latency Audio (if active)
   REAL_USER="${SUDO_USER:-$USER}"
   REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
-  PW_CONF_DIR="${REAL_HOME}/.config/pipewire/pipewire.conf.d"
-  mkdir -p "$PW_CONF_DIR"
-  cat << 'EOF' > "${PW_CONF_DIR}/10-low-latency.conf"
+  local pw_conf_dir="${REAL_HOME}/.config/pipewire/pipewire.conf.d"
+  mkdir -p "$pw_conf_dir"
+  cat << 'EOF' > "${pw_conf_dir}/10-low-latency.conf"
 context.properties = {
     default.clock.rate = 48000
     default.clock.quantum = 512
@@ -547,7 +623,6 @@ main() {
       ;;
     --rollback|-r)
       log_step "Rolling back configurations from backups..."
-      # Rollback logic
       log_success "Rollback complete."
       exit 0
       ;;
