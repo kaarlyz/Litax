@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# ZENITH: Universal Bare-Metal Linux Latency Hardening & Workstation Tuner
+# LITAX: Universal Bare-Metal Linux Latency Hardening & Workstation Tuner
 # Author: Eka Restu Syahputra (GitHub: kaarlyz) & Vallencia
 # License: MIT
 # Cross-Distro Support: Arch, Fedora, Ubuntu, Debian, openSUSE, Pop!_OS, Void
@@ -8,9 +8,9 @@
 
 set -euo pipefail
 
-VERSION="1.1.0"
-BACKUP_DIR="/var/backups/zenith-$(date +%Y%m%d-%H%M%S)"
-LOG_FILE="/tmp/zenith-tune.log"
+VERSION="1.2.0"
+BACKUP_BASE_DIR="/var/backups/litax"
+BACKUP_DIR="${BACKUP_BASE_DIR}/backup-$(date +%Y%m%d-%H%M%S)"
 
 # --- ANSI Styling ---
 BOLD='\033[1m'
@@ -31,19 +31,19 @@ log_step()    { echo -e "\n${BOLD}${MAGENTA}▶ $1${RESET}"; }
 banner() {
   [ -t 1 ] && clear 2>/dev/null || true
   echo -e "${CYAN}${BOLD}"
-  echo "███████╗███████╗███╗   ██╗██╗████████╗██╗  ██╗"
-  echo "╚══███╔╝██╔════╝████╗  ██║██║╚══██╔══╝██║  ██║"
-  echo "  ███╔╝ █████╗  ██╔██╗ ██║██║   ██║   ███████║"
-  echo " ███╔╝  ██╔══╝  ██║╚██╗██║██║   ██║   ██╔══██║"
-  echo "███████╗███████╗██║ ╚████║██║   ██║   ██║  ██║"
-  echo "╚══════╝╚══════╝╚═╝  ╚═══╝╚═╝   ╚═╝   ╚═╝  ╚═╝"
+  echo "██╗     ██╗████████╗ █████╗ ██╗  ██╗"
+  echo "██║     ██║╚══██╔══╝██╔══██╗╚██╗██╔╝"
+  echo "██║     ██║   ██║   ███████║ ╚███╔╝ "
+  echo "██║     ██║   ██║   ██╔══██║ ██╔██╗ "
+  echo "███████╗██║   ██║   ██║  ██║██╔╝ ██╗"
+  echo "╚══════╝╚═╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝"
   echo -e "${RESET}${DIM}  Universal Bare-Metal Latency Hardening & Workstation Tuner v${VERSION}${RESET}"
   echo -e "${DIM}  Zero-Stutter, Hardware-Aware Pacing & Universal Multi-Distro Support${RESET}\n"
 }
 
 check_root() {
   if [ "${EUID}" -ne 0 ]; then
-    echo -e "${RED}${BOLD}Error:${RESET} Zenith requires root privileges for kernel, udev, and systemd tuning."
+    echo -e "${RED}${BOLD}Error:${RESET} Litax requires root privileges for kernel, udev, and systemd tuning."
     echo -e "Please run with: ${CYAN}sudo $0${RESET}"
     exit 1
   fi
@@ -114,12 +114,8 @@ detect_environment() {
     # shellcheck disable=SC1091
     source /etc/os-release
     DISTRO_NAME="${NAME:-Linux}"
-    DISTRO_ID="${ID:-linux}"
-    DISTRO_LIKE="${ID_LIKE:-$DISTRO_ID}"
   else
     DISTRO_NAME="Generic Linux"
-    DISTRO_ID="generic"
-    DISTRO_LIKE="generic"
   fi
 
   if command -v pacman >/dev/null 2>&1; then
@@ -200,8 +196,25 @@ detect_environment() {
     CURRENT_DESKTOP="$XDG_CURRENT_DESKTOP"
   fi
 
+  # 7. Resolve Real Target User (Handles sudo or direct root)
+  REAL_USER="${SUDO_USER:-$USER}"
+  REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
+  if [ "$REAL_USER" = "root" ]; then
+    for u in /home/*; do
+      if [ -d "$u" ]; then
+        candidate="$(basename "$u")"
+        if id -u "$candidate" >/dev/null 2>&1 && [ "$(id -u "$candidate")" -ge 1000 ]; then
+          REAL_USER="$candidate"
+          REAL_HOME="$u"
+          break
+        fi
+      fi
+    done
+  fi
+
   # Display Summary
   echo -e "  ${BOLD}Distribution:${RESET}   ${DISTRO_NAME} (${PKG_MGR}, systemd: ${HAS_SYSTEMD})"
+  echo -e "  ${BOLD}Target User:${RESET}    ${REAL_USER} (${REAL_HOME})"
   echo -e "  ${BOLD}Processor:${RESET}      ${CPU_MODEL} (${CPU_CORES} threads, ${CPU_VENDOR})"
   echo -e "  ${BOLD}Memory:${RESET}         ${TOTAL_RAM_GB} GB RAM (Swap: ${CURRENT_SWAP_TYPE}${CURRENT_ZRAM_ALGO:+ [$CURRENT_ZRAM_ALGO]})"
   echo -e "  ${BOLD}Primary Disk:${RESET}   ${ROOT_DEV} (${ROOT_FS}, NVMe: ${IS_NVME})"
@@ -234,7 +247,6 @@ compression-algorithm = lz4
 EOF
     log_success "ZRAM compression set to LZ4 (sub-microsecond decompression at ~4,500 MB/s per core)."
 
-    # Reload systemd zram generator if active
     if [ "$HAS_SYSTEMD" = true ]; then
       swapoff /dev/zram0 2>/dev/null || true
       systemctl restart systemd-zram-setup@zram0.service 2>/dev/null || true
@@ -243,8 +255,8 @@ EOF
 
   # 2. Cross-Distro Sysctl Memory & Dirty Writeback Tuning
   mkdir -p /etc/sysctl.d
-  backup_config "/etc/sysctl.d/99-zenith-vm.conf"
-  cat << 'EOF' > /etc/sysctl.d/99-zenith-vm.conf
+  backup_config "/etc/sysctl.d/99-litax-vm.conf"
+  cat << 'EOF' > /etc/sysctl.d/99-litax-vm.conf
 # Virtual Memory & ZRAM Tuning
 vm.swappiness = 150
 vm.vfs_cache_pressure = 100
@@ -265,7 +277,7 @@ kernel.nmi_watchdog = 0
 kernel.sched_autogroup_enabled = 0
 kernel.pid_max = 4194304
 EOF
-  sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-zenith-vm.conf >/dev/null 2>&1 || true
+  sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-litax-vm.conf >/dev/null 2>&1 || true
   log_success "Kernel dirty page writeback converted to 64MB streaming batches (zero multi-gigabyte freeze spikes)."
 }
 
@@ -276,8 +288,8 @@ tune_storage() {
   # 1. NVMe udev tuning (Zero-Overhead I/O Accounting)
   if [ "$IS_NVME" = true ]; then
     mkdir -p /etc/udev/rules.d
-    backup_config "/etc/udev/rules.d/60-zenith-nvme.rules"
-    cat << 'EOF' > /etc/udev/rules.d/60-zenith-nvme.rules
+    backup_config "/etc/udev/rules.d/60-litax-nvme.rules"
+    cat << 'EOF' > /etc/udev/rules.d/60-litax-nvme.rules
 ACTION=="add|change", KERNEL=="nvme[0-9]*n[0-9]*", ATTR{queue/scheduler}="none", ATTR{queue/iostats}="0", ATTR{queue/read_ahead_kb}="128"
 EOF
     if command -v udevadm >/dev/null 2>&1; then
@@ -291,7 +303,7 @@ EOF
   if [ -f /etc/fstab ]; then
     backup_config "/etc/fstab"
 
-    # Universal noatime conversion across all modern SSDs
+    # Universal noatime conversion across all modern SSD mounts
     if grep -q "relatime" /etc/fstab; then
       sed -i 's/relatime/noatime/g' /etc/fstab
       mount -o remount,noatime / 2>/dev/null || true
@@ -301,7 +313,7 @@ EOF
 
     # Btrfs commit=120
     if [ "$ROOT_FS" = "btrfs" ] && ! grep -q "commit=" /etc/fstab; then
-      sed -i 's/space_cache=v2/space_cache=v2,commit=120/g' /etc/fstab
+      sed -i '/\bbtrfs\b/ s/\(rw[^ \t]*\)/\1,commit=120/' /etc/fstab 2>/dev/null || true
       mount -o remount,commit=120 / 2>/dev/null || true
       mount -o remount,commit=120 /home 2>/dev/null || true
       log_success "Btrfs commit interval extended to 120s (transient build files coalesce in RAM)."
@@ -309,6 +321,7 @@ EOF
 
     # Ext4 commit=60 (Ubuntu / Debian default)
     if [ "$ROOT_FS" = "ext4" ] && ! grep -q "commit=" /etc/fstab; then
+      sed -i '/\bext4\b/ s/\(defaults\|rw[^ \t]*\)/\1,commit=60/' /etc/fstab 2>/dev/null || true
       mount -o remount,commit=60 / 2>/dev/null || true
       log_success "Ext4 commit interval extended to 60s (reduces disk write churn during builds)."
     fi
@@ -318,15 +331,15 @@ EOF
   if [ "$HAS_SYSTEMD" = true ]; then
     systemctl enable --now fstrim.timer >/dev/null 2>&1 || true
     log_success "fstrim.timer enabled for automated weekly background flash reclamation."
+  else
+    fstrim -va 2>/dev/null || true
+    log_success "Initial fstrim executed across partitions."
   fi
 }
 
 # --- Module 3: Wayland Compositor & Display Frame Pacing ---
 tune_wayland_display() {
   log_step "Tuning Wayland Compositor & Display Frame Pacing..."
-
-  REAL_USER="${SUDO_USER:-$USER}"
-  REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 
   # 1. KDE Plasma (6 or 5)
   local kwritecmd=""
@@ -389,7 +402,7 @@ tune_gpu_and_toolkits() {
 
   cat << 'EOF' >> /etc/environment
 
-# Zenith Workstation Engine: Hardware Acceleration & Low-Latency
+# Litax Workstation Engine: Hardware Acceleration & Low-Latency
 RADV_PERFTEST=sam,nggc
 MESA_SHADER_CACHE_MAX_SIZE=10G
 MESA_DISK_CACHE_SINGLE_FILE=1
@@ -419,9 +432,6 @@ EOF
 tune_applications() {
   log_step "Tuning Application Scrolling & Acceleration Profiles..."
 
-  REAL_USER="${SUDO_USER:-$USER}"
-  REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
-
   # 1. Brave Browser Flags
   local brave_flags="${REAL_HOME}/.config/brave-flags.conf"
   mkdir -p "$(dirname "$brave_flags")"
@@ -449,13 +459,16 @@ EOF
   chown "$REAL_USER:$REAL_USER" "$code_flags"
   log_success "VS Code: Wayland window decorations and zero-copy rasterization enabled."
 
-  # 3. Firefox MSD Physics Scrolling
-  for ff_userjs in "${REAL_HOME}/.mozilla/firefox/"*"/user.js" "${REAL_HOME}/.config/mozilla/firefox/"*"/user.js"; do
-    if [ -f "$ff_userjs" ]; then
-      sed -i '/Zenith Kinetic/d' "$ff_userjs" 2>/dev/null || true
+  # 3. Firefox MSD Physics Scrolling (Finds or Creates user.js in Profile)
+  local found_ff=false
+  for ff_prof in "${REAL_HOME}/.mozilla/firefox/"*default* "${REAL_HOME}/.config/mozilla/firefox/"*default*; do
+    if [ -d "$ff_prof" ]; then
+      local ff_userjs="${ff_prof}/user.js"
+      touch "$ff_userjs"
+      sed -i '/Litax Kinetic/d' "$ff_userjs" 2>/dev/null || true
       cat << 'EOF' >> "$ff_userjs"
 
-// Zenith Kinetic Mass-Spring-Damper (MSD) Scrolling
+// Litax Kinetic Mass-Spring-Damper (MSD) Scrolling
 user_pref("general.smoothScroll", true);
 user_pref("general.smoothScroll.msdPhysics.enabled", true);
 user_pref("general.smoothScroll.msdPhysics.continuousAccelerationMaxFactor", 2.5);
@@ -469,10 +482,14 @@ user_pref("media.ffmpeg.vaapi.enabled", true);
 user_pref("widget.wayland.smooth-scroll", true);
 EOF
       chown "$REAL_USER:$REAL_USER" "$ff_userjs"
-      log_success "Firefox profile tuned: Mass-Spring-Damper physics and 1GB in-memory tab cache."
+      log_success "Firefox profile (${ff_prof##*/}) tuned: Mass-Spring-Damper physics and 1GB in-memory tab cache."
+      found_ff=true
       break
     fi
   done
+  if [ "$found_ff" = false ]; then
+    log_info "No active Firefox profile directory found. Skipped Firefox user.js tuning."
+  fi
 
   # 4. Flatpak Electron Permissions
   if command -v flatpak >/dev/null 2>&1; then
@@ -490,15 +507,15 @@ tune_network() {
   modprobe sch_cake 2>/dev/null || true
 
   mkdir -p /etc/modules-load.d
-  backup_config "/etc/modules-load.d/zenith-net.conf"
-  cat << 'EOF' > /etc/modules-load.d/zenith-net.conf
+  backup_config "/etc/modules-load.d/litax-net.conf"
+  cat << 'EOF' > /etc/modules-load.d/litax-net.conf
 tcp_bbr
 sch_cake
 EOF
 
   mkdir -p /etc/sysctl.d
-  backup_config "/etc/sysctl.d/99-zenith-net.conf"
-  cat << 'EOF' > /etc/sysctl.d/99-zenith-net.conf
+  backup_config "/etc/sysctl.d/99-litax-net.conf"
+  cat << 'EOF' > /etc/sysctl.d/99-litax-net.conf
 # Bufferbloat Elimination & Line-Speed TCP Stack
 net.core.default_qdisc = cake
 net.ipv4.tcp_congestion_control = bbr
@@ -518,7 +535,7 @@ fs.aio-max-nr = 1048576
 fs.inotify.max_user_watches = 524288
 fs.inotify.max_user_instances = 1024
 EOF
-  sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-zenith-net.conf >/dev/null 2>&1 || true
+  sysctl --system >/dev/null 2>&1 || sysctl -p /etc/sysctl.d/99-litax-net.conf >/dev/null 2>&1 || true
   log_success "BBR + CAKE active with tcp_slow_start_after_idle=0 (line-speed retention on idle streams)."
 }
 
@@ -532,7 +549,7 @@ tune_process_priority() {
 
   if command -v ananicy-cpp >/dev/null 2>&1; then
     mkdir -p /etc/ananicy.d
-    cat << 'EOF' > /etc/ananicy.d/99-zenith-workstation.rules
+    cat << 'EOF' > /etc/ananicy.d/99-litax-workstation.rules
 { "name": "kwin_wayland", "nice": -12, "ioclass": "best-effort" }
 { "name": "plasmashell", "nice": -4, "ioclass": "best-effort" }
 { "name": "gnome-shell", "nice": -10, "ioclass": "best-effort" }
@@ -548,6 +565,8 @@ EOF
       systemctl restart ananicy-cpp.service 2>/dev/null || true
     fi
     log_success "Ananicy rules deployed: Compositor & editors elevated; background chat workers throttled to idle."
+  else
+    log_info "ananicy-cpp not installed. Process nice rules skipped."
   fi
 }
 
@@ -567,7 +586,7 @@ EOF
 
     # 2. Journald Churn Cap
     mkdir -p /etc/systemd/journald.conf.d
-    cat << 'EOF' > /etc/systemd/journald.conf.d/00-zenith-journal.conf
+    cat << 'EOF' > /etc/systemd/journald.conf.d/00-litax-journal.conf
 [Journal]
 SystemMaxUse=100M
 RuntimeMaxUse=50M
@@ -581,8 +600,6 @@ EOF
   fi
 
   # 3. PipeWire Low-Latency Audio (if active)
-  REAL_USER="${SUDO_USER:-$USER}"
-  REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
   local pw_conf_dir="${REAL_HOME}/.config/pipewire/pipewire.conf.d"
   mkdir -p "$pw_conf_dir"
   cat << 'EOF' > "${pw_conf_dir}/10-low-latency.conf"
@@ -595,6 +612,27 @@ context.properties = {
 EOF
   chown -R "$REAL_USER:$REAL_USER" "${REAL_HOME}/.config/pipewire" 2>/dev/null || true
   log_success "PipeWire audio buffer set to 512 samples (~10.6ms reaction latency)."
+}
+
+# --- Rollback Engine ---
+rollback_configurations() {
+  log_step "Searching for latest configuration backup..."
+
+  local latest_backup
+  latest_backup=$(find "$BACKUP_BASE_DIR" -maxdepth 1 -type d -name "backup-*" 2>/dev/null | sort -r | head -n1 || true)
+
+  if [ -z "$latest_backup" ] || [ ! -d "$latest_backup" ]; then
+    log_warn "No backups found in ${BACKUP_BASE_DIR}. Nothing to rollback."
+    exit 0
+  fi
+
+  log_info "Restoring from backup: ${latest_backup}..."
+  cp -rf "${latest_backup}/"* / 2>/dev/null || true
+
+  # Re-apply sysctl if restored
+  sysctl --system >/dev/null 2>&1 || true
+
+  log_success "Configurations successfully restored from backup."
 }
 
 # --- Main CLI Flow ---
@@ -611,7 +649,7 @@ main() {
       exit 0
       ;;
     --apply|-y|--auto)
-      echo -e "\n${BOLD}Applying Full Zenith Latency Hardening Pipeline...${RESET}"
+      echo -e "\n${BOLD}Applying Full Litax Latency Hardening Pipeline...${RESET}"
       tune_zram_and_vm
       tune_storage
       tune_wayland_display
@@ -622,8 +660,7 @@ main() {
       tune_system_hygiene
       ;;
     --rollback|-r)
-      log_step "Rolling back configurations from backups..."
-      log_success "Rollback complete."
+      rollback_configurations
       exit 0
       ;;
     --interactive|*)
@@ -632,8 +669,9 @@ main() {
       echo "  2) Virtual Memory & ZRAM Only"
       echo "  3) Wayland & Display Frame Pacing Only"
       echo "  4) Network & Storage Only"
-      echo "  5) Exit"
-      read -rp "Enter choice [1-5]: " choice
+      echo "  5) Rollback to Previous Backup"
+      echo "  6) Exit"
+      read -rp "Enter choice [1-6]: " choice
       case "$choice" in
         1)
           tune_zram_and_vm
@@ -648,12 +686,13 @@ main() {
         2) tune_zram_and_vm ;;
         3) tune_wayland_display; tune_gpu_and_toolkits ;;
         4) tune_storage; tune_network ;;
+        5) rollback_configurations ;;
         *) exit 0 ;;
       esac
       ;;
   esac
 
-  echo -e "\n${BOLD}${GREEN}✨ [ZENITH TUNE COMPLETED]${RESET}"
+  echo -e "\n${BOLD}${GREEN}✨ [LITAX TUNE COMPLETED]${RESET}"
   echo -e "${DIM}All bare-metal latency hardening configurations have been applied live and persisted.${RESET}"
   echo -e "${DIM}Your Linux workstation is now locked at maximum hardware responsiveness with zero jitter.${RESET}\n"
 }
