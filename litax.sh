@@ -248,8 +248,15 @@ EOF
     log_success "ZRAM compression set to LZ4 (sub-microsecond decompression at ~4,500 MB/s per core)."
 
     if [ "$HAS_SYSTEMD" = true ]; then
-      swapoff /dev/zram0 2>/dev/null || true
-      systemctl restart systemd-zram-setup@zram0.service 2>/dev/null || true
+      local swap_used_kb ram_avail_kb
+      swap_used_kb=$(awk '/SwapTotal/ {t=$2} /SwapFree/ {f=$2} END {print (t-f)}' /proc/meminfo)
+      ram_avail_kb=$(awk '/MemAvailable/ {print $2}' /proc/meminfo)
+      if [ "$swap_used_kb" -lt "$ram_avail_kb" ]; then
+        swapoff /dev/zram0 2>/dev/null || true
+        systemctl restart systemd-zram-setup@zram0.service 2>/dev/null || true
+      else
+        log_warn "Swap aktif (${swap_used_kb} KB) melebihi RAM kosong (${ram_avail_kb} KB). ZRAM baru akan aktif saat reboot atau swap kosong."
+      fi
     fi
   fi
 
@@ -264,6 +271,7 @@ vm.watermark_boost_factor = 0
 vm.watermark_scale_factor = 125
 vm.page-cluster = 0
 vm.stat_interval = 10
+vm.max_map_count = 2147483642
 
 # Proactive Background Compaction (Stops Allocation Stalls)
 vm.compaction_proactiveness = 20
