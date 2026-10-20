@@ -59,7 +59,7 @@ sudo ./litax.sh --rollback
 ██║     ██║   ██║   ██╔══██║ ██╔██╗ 
 ███████╗██║   ██║   ██║  ██║██╔╝ ██╗
 ╚══════╝╚═╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝
-  Universal Bare-Metal Latency Hardening & Workstation Tuner v1.2.0
+  Universal Bare-Metal Latency Hardening & Workstation Tuner v1.3.0
   Zero-Stutter, Hardware-Aware Pacing & Universal Multi-Distro Support
 
 ▶ Analyzing Hardware & Software Environment...
@@ -69,6 +69,7 @@ sudo ./litax.sh --rollback
   Memory:         16 GB RAM (Swap: zram [lz4])
   Primary Disk:   /dev/nvme0n1p2 (btrfs, NVMe: true)
   Graphics:       AMD (KDE Plasma, Wayland: true)
+  Power Profile:  Laptop Battery Detected (Dynamic AC/BAT)
 
 Applying Full Litax Latency Hardening Pipeline...
   ✔  ZRAM compression set to LZ4 (~4,500 MB/s per core).
@@ -83,6 +84,7 @@ Applying Full Litax Latency Hardening Pipeline...
   ✔  VS Code: Zero-copy hardware acceleration enabled.
   ✔  BBR + CAKE active with tcp_slow_start_after_idle=0.
   ✔  PipeWire audio buffer set to 512 samples (~10.6ms reaction latency).
+  ✔  Dynamic AC/Battery power profiler deployed: Udev hotplug active, live profile synced.
 ```
 
 ---
@@ -98,6 +100,7 @@ Most Linux distributions are shipped with conservative default configurations tu
 5. **Flatpak Electron Spinloops**: Sandboxed chat apps (Discord, Whatsie/WhatsApp) often fall back to XWayland software rasterizers, spinning at 100–300% CPU. **Litax grants direct DRI and native Wayland sockets**, offloading rendering to the GPU.
 6. **Network Line-Speed Drop**: Linux defaults to resetting TCP congestion windows on idle connections (`tcp_slow_start_after_idle = 1`). **Litax disables this penalty**, keeping WebSocket, SSE, and HMR connections at instant line speed.
 7. **Audio Buffer Latency**: PipeWire defaults to a 1024-sample buffer (21.3 ms latency). **Litax calibrates PipeWire to 512 samples (~10.6 ms)** with a 64-sample floor for instantaneous sound feedback.
+8. **Laptop Battery Drain vs Fixed Pinning (Dynamic AC/BAT Auto-Switch)**: Default desktop profiles either lock high power states (draining laptop batteries in 2 hours) or throttle CPUs into stuttering slowness. **Litax deploys a native, zero-overhead udev power switcher (`litax-power-profile`)**: instant `balance_performance` on AC, and hardware-managed `balance_power` + PCIe ASPM + audio DAC sleep on battery. Multitasking stays ultra-fluid without burning background Watts.
 
 ---
 
@@ -128,7 +131,8 @@ litax/
 ├── Module 5: Application Ergonomics (Firefox MSD physics scroll, Brave zero-copy, VS Code Wayland)
 ├── Module 6: Network Stack (BBR + CAKE qdisc, tcp_slow_start_after_idle=0, 55k ports)
 ├── Module 7: Dynamic Process Priority (Ananicy-cpp compositor elevation, chat wrapper isolation)
-└── Module 8: System Freeze Protection (systemd-coredump disabled, journald capped at 100MB)
+├── Module 8: System Freeze Protection (systemd-coredump disabled, journald capped at 100MB)
+└── Module 9: Dynamic AC/Battery Power Governor & EPP Optimization (Udev hotplug, PCIe ASPM)
 ```
 
 ---

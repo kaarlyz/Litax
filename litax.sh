@@ -8,7 +8,7 @@
 
 set -euo pipefail
 
-VERSION="1.2.0"
+VERSION="1.3.0"
 BACKUP_BASE_DIR="/var/backups/litax"
 BACKUP_DIR="${BACKUP_BASE_DIR}/backup-$(date +%Y%m%d-%H%M%S)"
 
@@ -212,6 +212,15 @@ detect_environment() {
     done
   fi
 
+  # 8. Power Supply & Battery Detection
+  HAS_BATTERY=false
+  for b in /sys/class/power_supply/*; do
+    if [ -f "$b/type" ] && grep -qi "battery" "$b/type"; then
+      HAS_BATTERY=true
+      break
+    fi
+  done
+
   # Display Summary
   echo -e "  ${BOLD}Distribution:${RESET}   ${DISTRO_NAME} (${PKG_MGR}, systemd: ${HAS_SYSTEMD})"
   echo -e "  ${BOLD}Target User:${RESET}    ${REAL_USER} (${REAL_HOME})"
@@ -219,6 +228,7 @@ detect_environment() {
   echo -e "  ${BOLD}Memory:${RESET}         ${TOTAL_RAM_GB} GB RAM (Swap: ${CURRENT_SWAP_TYPE}${CURRENT_ZRAM_ALGO:+ [$CURRENT_ZRAM_ALGO]})"
   echo -e "  ${BOLD}Primary Disk:${RESET}   ${ROOT_DEV} (${ROOT_FS}, NVMe: ${IS_NVME})"
   echo -e "  ${BOLD}Graphics:${RESET}       ${GPU_VENDOR} (${CURRENT_DESKTOP}, Wayland: ${IS_WAYLAND})"
+  echo -e "  ${BOLD}Power Profile:${RESET}  $([ "$HAS_BATTERY" = true ] && echo "Laptop Battery Detected (Dynamic AC/BAT)" || echo "Desktop System (Fixed Performance)")"
 }
 
 # --- Module 1: ZRAM LZ4 & Low-Latency Virtual Memory ---
@@ -622,6 +632,153 @@ EOF
   log_success "PipeWire audio buffer set to 512 samples (~10.6ms reaction latency)."
 }
 
+# --- Module 9: Dynamic AC/Battery Power Governor & EPP Optimization ---
+tune_power_and_battery() {
+  log_step "Tuning Dynamic AC/Battery Power Profiles & EPP Steering..."
+
+  if [ "${HAS_BATTERY:-false}" != true ]; then
+    log_info "No battery detected (Desktop system). Applying fixed low-latency performance profile..."
+    local cpu_driver=""
+    if [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver ]; then
+      cpu_driver="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver 2>/dev/null || true)"
+    fi
+
+    if [[ "$cpu_driver" =~ pstate ]]; then
+      for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+        [ -f "$gov" ] && echo "powersave" > "$gov" 2>/dev/null || true
+      done
+      for epp in /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference; do
+        [ -f "$epp" ] && echo "balance_performance" > "$epp" 2>/dev/null || true
+      done
+    else
+      for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+        [ -f "$gov" ] && echo "performance" > "$gov" 2>/dev/null || true
+      done
+    fi
+    log_success "Desktop fixed low-latency governor active."
+    return 0
+  fi
+
+  # ponytail: Native sysfs + udev profile switcher without dbus/python daemons. Upgrade path: add user-configurable TDP ceilings in /etc/litax.conf.
+  backup_config "/usr/local/bin/litax-power-profile"
+  mkdir -p /usr/local/bin
+  cat << 'EOF' > /usr/local/bin/litax-power-profile
+#!/usr/bin/env bash
+# ==============================================================================
+# LITAX DYNAMIC POWER PROFILER: Native Hardware-Aware AC / Battery Switcher
+# Automated micro-controller steering: EPP, scaling governors, boost, PCIe ASPM
+# ==============================================================================
+
+set -euo pipefail
+
+is_ac_online() {
+  local online=0
+  for f in /sys/class/power_supply/*/online; do
+    [ -f "$f" ] || continue
+    if [ "$(cat "$f" 2>/dev/null)" = "1" ]; then
+      online=1
+      break
+    fi
+  done
+  return $(( 1 - online ))
+}
+
+CPU_DRIVER=""
+if [ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver ]; then
+  CPU_DRIVER="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver 2>/dev/null || true)"
+fi
+
+if is_ac_online; then
+  # --- AC MODE: Maximum Low-Latency Workstation Responsiveness ---
+  if [[ "$CPU_DRIVER" =~ pstate ]]; then
+    for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+      [ -f "$gov" ] && echo "powersave" > "$gov" 2>/dev/null || true
+    done
+    for epp in /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference; do
+      [ -f "$epp" ] && echo "balance_performance" > "$epp" 2>/dev/null || true
+    done
+  else
+    for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+      [ -f "$gov" ] && echo "performance" > "$gov" 2>/dev/null || true
+    done
+  fi
+
+  [ -f /sys/devices/system/cpu/cpufreq/boost ] && echo 1 > /sys/devices/system/cpu/cpufreq/boost 2>/dev/null || true
+  [ -f /sys/module/pcie_aspm/parameters/policy ] && echo default > /sys/module/pcie_aspm/parameters/policy 2>/dev/null || true
+  [ -f /sys/module/snd_hda_intel/parameters/power_save ] && echo 0 > /sys/module/snd_hda_intel/parameters/power_save 2>/dev/null || true
+
+  if command -v ryzenadj >/dev/null 2>&1; then
+    ryzenadj -a 26000 -b 30000 -c 26000 --max-performance >/dev/null 2>&1 || true
+  fi
+
+  logger -t litax-power "Switched to AC Profile (Low-Latency Workstation Mode)" 2>/dev/null || true
+else
+  # --- BATTERY MODE: Hardware Efficiency & Zero-Jitter Multitasking ---
+  if [[ "$CPU_DRIVER" =~ pstate ]]; then
+    for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+      [ -f "$gov" ] && echo "powersave" > "$gov" 2>/dev/null || true
+    done
+    for epp in /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference; do
+      [ -f "$epp" ] && echo "balance_power" > "$epp" 2>/dev/null || true
+    done
+  else
+    for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+      [ -f "$gov" ] && echo "powersave" > "$gov" 2>/dev/null || true
+    done
+  fi
+
+  [ -f /sys/devices/system/cpu/cpufreq/boost ] && echo 0 > /sys/devices/system/cpu/cpufreq/boost 2>/dev/null || true
+  [ -f /sys/module/pcie_aspm/parameters/policy ] && echo powersave > /sys/module/pcie_aspm/parameters/policy 2>/dev/null || true
+  [ -f /sys/module/snd_hda_intel/parameters/power_save ] && echo 1 > /sys/module/snd_hda_intel/parameters/power_save 2>/dev/null || true
+  [ -f /sys/module/snd_hda_intel/parameters/power_save_controller ] && echo Y > /sys/module/snd_hda_intel/parameters/power_save_controller 2>/dev/null || true
+
+  for ctrl in /sys/bus/pci/devices/*/power/control; do
+    [ -f "$ctrl" ] && echo auto > "$ctrl" 2>/dev/null || true
+  done
+
+  if command -v ryzenadj >/dev/null 2>&1; then
+    ryzenadj -a 12000 -b 15000 -c 12000 >/dev/null 2>&1 || true
+  fi
+
+  logger -t litax-power "Switched to Battery Profile (Power-Saving Multitasking Mode)" 2>/dev/null || true
+fi
+EOF
+  chmod 755 /usr/local/bin/litax-power-profile
+
+  backup_config "/etc/udev/rules.d/99-litax-power.rules"
+  mkdir -p /etc/udev/rules.d
+  cat << 'EOF' > /etc/udev/rules.d/99-litax-power.rules
+# Litax dynamic AC/Battery power profile switching
+SUBSYSTEM=="power_supply", ACTION=="change", RUN+="/usr/local/bin/litax-power-profile"
+EOF
+  if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules 2>/dev/null || true
+  fi
+
+  if [ "$HAS_SYSTEMD" = true ]; then
+    backup_config "/etc/systemd/system/litax-power.service"
+    cat << 'EOF' > /etc/systemd/system/litax-power.service
+[Unit]
+Description=Litax Dynamic AC/Battery Power Profile Initializer
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/litax-power-profile
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable litax-power.service >/dev/null 2>&1 || true
+    systemctl start litax-power.service >/dev/null 2>&1 || true
+  fi
+
+  /usr/local/bin/litax-power-profile
+  log_success "Dynamic AC/Battery power profiler deployed: Udev hotplug active, live profile synced."
+}
+
 # --- Rollback Engine ---
 rollback_configurations() {
   log_step "Searching for latest configuration backup..."
@@ -666,6 +823,7 @@ main() {
       tune_network
       tune_process_priority
       tune_system_hygiene
+      tune_power_and_battery
       ;;
     --rollback|-r)
       rollback_configurations
@@ -677,9 +835,10 @@ main() {
       echo "  2) Virtual Memory & ZRAM Only"
       echo "  3) Wayland & Display Frame Pacing Only"
       echo "  4) Network & Storage Only"
-      echo "  5) Rollback to Previous Backup"
-      echo "  6) Exit"
-      read -rp "Enter choice [1-6]: " choice
+      echo "  5) Dynamic AC/Battery Power Governor Only"
+      echo "  6) Rollback to Previous Backup"
+      echo "  7) Exit"
+      read -rp "Enter choice [1-7]: " choice
       case "$choice" in
         1)
           tune_zram_and_vm
@@ -690,11 +849,13 @@ main() {
           tune_network
           tune_process_priority
           tune_system_hygiene
+          tune_power_and_battery
           ;;
         2) tune_zram_and_vm ;;
         3) tune_wayland_display; tune_gpu_and_toolkits ;;
         4) tune_storage; tune_network ;;
-        5) rollback_configurations ;;
+        5) tune_power_and_battery ;;
+        6) rollback_configurations ;;
         *) exit 0 ;;
       esac
       ;;
