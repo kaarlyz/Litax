@@ -675,7 +675,8 @@ is_ac_online() {
   local online=0
   for f in /sys/class/power_supply/*/online; do
     [ -f "$f" ] || continue
-    if [ "$(cat "$f" 2>/dev/null)" = "1" ]; then
+    val="$(timeout 1 cat "$f" 2>/dev/null || echo 0)"
+    if [ "$val" = "1" ]; then
       online=1
       break
     fi
@@ -707,6 +708,17 @@ if is_ac_online; then
   [ -f /sys/module/pcie_aspm/parameters/policy ] && echo default > /sys/module/pcie_aspm/parameters/policy 2>/dev/null || true
   [ -f /sys/module/snd_hda_intel/parameters/power_save ] && echo 0 > /sys/module/snd_hda_intel/parameters/power_save 2>/dev/null || true
 
+  # Ensure GPU/Display controller stays fully powered on AC
+  for ctrl in /sys/bus/pci/devices/*/power/control; do
+    dev_dir="$(dirname "$(dirname "$ctrl")")"
+    if [ -f "$dev_dir/class" ]; then
+      pci_class="$(cat "$dev_dir/class" 2>/dev/null || true)"
+      if [[ "$pci_class" =~ ^0x03 ]]; then
+        echo on > "$ctrl" 2>/dev/null || true
+      fi
+    fi
+  done
+
   if command -v ryzenadj >/dev/null 2>&1; then
     ryzenadj -a 26000 -b 30000 -c 26000 --max-performance >/dev/null 2>&1 || true
   fi
@@ -732,12 +744,21 @@ else
   [ -f /sys/module/snd_hda_intel/parameters/power_save ] && echo 1 > /sys/module/snd_hda_intel/parameters/power_save 2>/dev/null || true
   [ -f /sys/module/snd_hda_intel/parameters/power_save_controller ] && echo Y > /sys/module/snd_hda_intel/parameters/power_save_controller 2>/dev/null || true
 
+  # SAFE PCI PM: NEVER suspend VGA/Display controller (0x03xxxx) to prevent GPU freeze
   for ctrl in /sys/bus/pci/devices/*/power/control; do
+    dev_dir="$(dirname "$(dirname "$ctrl")")"
+    if [ -f "$dev_dir/class" ]; then
+      pci_class="$(cat "$dev_dir/class" 2>/dev/null || true)"
+      if [[ "$pci_class" =~ ^0x03 ]]; then
+        echo on > "$ctrl" 2>/dev/null || true
+        continue
+      fi
+    fi
     [ -f "$ctrl" ] && echo auto > "$ctrl" 2>/dev/null || true
   done
 
   if command -v ryzenadj >/dev/null 2>&1; then
-    ryzenadj -a 12000 -b 15000 -c 12000 >/dev/null 2>&1 || true
+    ryzenadj -a 18000 -b 22000 -c 18000 >/dev/null 2>&1 || true
   fi
 
   logger -t litax-power "Switched to Battery Profile (Power-Saving Multitasking Mode)" 2>/dev/null || true
@@ -748,8 +769,8 @@ EOF
   backup_config "/etc/udev/rules.d/99-litax-power.rules"
   mkdir -p /etc/udev/rules.d
   cat << 'EOF' > /etc/udev/rules.d/99-litax-power.rules
-# Litax dynamic AC/Battery power profile switching
-SUBSYSTEM=="power_supply", ACTION=="change", RUN+="/usr/local/bin/litax-power-profile"
+# Litax dynamic AC/Battery power profile switching (non-blocking)
+SUBSYSTEM=="power_supply", ACTION=="change", RUN+="/usr/bin/systemd-run --no-block /usr/local/bin/litax-power-profile"
 EOF
   if command -v udevadm >/dev/null 2>&1; then
     udevadm control --reload-rules 2>/dev/null || true
